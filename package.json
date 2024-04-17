@@ -1,0 +1,11 @@
+{
+  "name": "tensor.js",
+  "version": "0.0.1",
+  "description": "tensor data structure and operations",
+  "main": "tensor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "derby",
+  "license": "ISC"
+}
