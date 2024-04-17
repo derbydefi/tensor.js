@@ -1,8 +1,17 @@
 class Tensor {
-	constructor(data, shape = null, dtype = "float32") {
-		this.data = data;
-		this.shape = shape || this.inferShape(data);
-		this.dtype = dtype; // Data type: float32, int32, etc.
+	constructor(data, shape = null, dtype = "float64") {
+		this.dtype = dtype;
+		if (data instanceof Float32Array || data instanceof Float64Array) {
+			this.data = data;
+			this.shape = shape || [data.length];
+			// Ensure dtype matches the type of the TypedArray
+			this.dtype = data instanceof Float32Array ? "float32" : "float64";
+		} else {
+			// Automatically handle regular array conversion to TypedArray
+			const conversion = this.convertToTypedArray(data, dtype);
+			this.shape = shape || conversion.shape; // Use provided shape or inferred shape
+			this.data = conversion.data;
+		}
 	}
 
 	inferShape(data) {
@@ -16,35 +25,42 @@ class Tensor {
 
 		return shape;
 	}
+	convertToTypedArray(data, dtype = "float64") {
+		const shape = this.inferShape(data);
+		const flatData = this.flatten(data);
+		switch (dtype) {
+			case "float32":
+				return { data: new Float32Array(flatData), shape };
+			case "float64":
+				return { data: new Float64Array(flatData), shape };
+			default:
+				throw new Error("Unsupported data type");
+		}
+	}
+
+	flatten(data) {
+		return data.reduce(
+			(acc, val) => acc.concat(Array.isArray(val) ? this.flatten(val) : val),
+			[]
+		);
+	}
+
 	transpose() {
-		if (this.shape.length < 2) {
-			throw new Error("Transpose requires at least a 2D tensor");
+		if (this.shape.length !== 2) {
+			throw new Error("Transpose requires a 2D tensor");
 		}
-		const result = Array.from({ length: this.shape[1] }, () => []);
-		for (let i = 0; i < this.shape[0]; i++) {
-			for (let j = 0; j < this.shape[1]; j++) {
-				result[j][i] = this.data[i][j];
+
+		const rows = this.shape[0];
+		const cols = this.shape[1];
+		const result = new this.data.constructor(rows * cols); // Create a new TypedArray of the same type
+		for (let i = 0; i < rows; i++) {
+			for (let j = 0; j < cols; j++) {
+				result[j * rows + i] = this.data[i * cols + j];
 			}
 		}
-		return new Tensor(result);
+		return new Tensor(result, [cols, rows], this.dtype);
 	}
-	transposeInPlace() {
-		if (this.shape.length < 2) {
-			throw new Error("Transpose requires at least a 2D tensor");
-		}
-		const result = [];
-		const [row, col] = this.shape.slice(-2);
-		for (let i = 0; i < col; i++) {
-			const newRow = [];
-			for (let j = 0; j < row; j++) {
-				newRow.push(this.data[j][i]);
-			}
-			result.push(newRow);
-		}
-		this.data = result;
-		this.shape = this.shape.slice(0, -2).concat([col, row]);
-		return this;
-	}
+
 	dotProduct(other) {
 		if (this.shape.length !== 1 || other.shape.length !== 1) {
 			throw new Error("Dot product is only applicable to 1D tensors.");
@@ -74,18 +90,24 @@ class Tensor {
 			throw new Error("Incompatible shapes for matrix multiplication");
 		}
 
-		const result = new Array(this.shape[0])
-			.fill(0)
-			.map(() => new Array(other.shape[1]).fill(0));
-		for (let i = 0; i < this.shape[0]; i++) {
-			for (let j = 0; j < other.shape[1]; j++) {
-				for (let k = 0; k < this.shape[1]; k++) {
-					result[i][j] += this.data[i][k] * other.data[k][j];
+		// Create a new TypedArray for the result.
+		const rowsA = this.shape[0];
+		const colsA = this.shape[1];
+		const colsB = other.shape[1];
+		const result = new this.data.constructor(rowsA * colsB);
+
+		for (let i = 0; i < rowsA; i++) {
+			for (let j = 0; j < colsB; j++) {
+				let sum = 0;
+				for (let k = 0; k < colsA; k++) {
+					sum += this.data[i * colsA + k] * other.data[k * colsB + j];
 				}
+				result[i * colsB + j] = sum;
 			}
 		}
-		return new Tensor(result);
+		return new Tensor(result, [rowsA, colsB], this.dtype);
 	}
+
 	strassenMatMul(other) {
 		if (this.shape.length !== 2 || other.shape.length !== 2) {
 			throw new Error("Both tensors must be 2D for matrix multiplication");
@@ -136,32 +158,85 @@ class Tensor {
 		return Math.pow(2, Math.ceil(Math.log2(x)));
 	}
 	padToSize(newRows, newCols) {
-		const paddedData = Array.from({ length: newRows }, (_, i) =>
-			Array.from({ length: newCols }, (_, j) =>
-				i < this.shape[0] && j < this.shape[1] ? this.data[i][j] : 0
-			)
-		);
-		return new Tensor(paddedData, [newRows, newCols]);
+		const paddedData = new this.data.constructor(newRows * newCols);
+		const originalCols = this.shape[1];
+
+		for (let i = 0; i < newRows; i++) {
+			for (let j = 0; j < newCols; j++) {
+				if (i < this.shape[0] && j < this.shape[1]) {
+					paddedData[i * newCols + j] = this.data[i * originalCols + j];
+				} else {
+					paddedData[i * newCols + j] = 0;
+				}
+			}
+		}
+		return new Tensor(paddedData, [newRows, newCols], this.dtype);
 	}
 
 	splitIntoQuarters() {
 		const midRow = this.shape[0] / 2;
 		const midCol = this.shape[1] / 2;
-		const quarters = [
-			new Tensor(this.data.slice(0, midRow).map((row) => row.slice(0, midCol))), // A11
-			new Tensor(this.data.slice(0, midRow).map((row) => row.slice(midCol))), // A12
-			new Tensor(this.data.slice(midRow).map((row) => row.slice(0, midCol))), // A21
-			new Tensor(this.data.slice(midRow).map((row) => row.slice(midCol))), // A22
-		];
-		return quarters;
+		const rowLength = this.shape[1];
+
+		const A11 = new Tensor(
+			new this.data.constructor(midRow * midCol),
+			[midRow, midCol],
+			this.dtype
+		);
+		const A12 = new Tensor(
+			new this.data.constructor(midRow * midCol),
+			[midRow, midCol],
+			this.dtype
+		);
+		const A21 = new Tensor(
+			new this.data.constructor(midRow * midCol),
+			[midRow, midCol],
+			this.dtype
+		);
+		const A22 = new Tensor(
+			new this.data.constructor(midRow * midCol),
+			[midRow, midCol],
+			this.dtype
+		);
+
+		for (let i = 0; i < midRow; i++) {
+			for (let j = 0; j < midCol; j++) {
+				A11.data[i * midCol + j] = this.data[i * rowLength + j];
+				A12.data[i * midCol + j] = this.data[i * rowLength + j + midCol];
+				A21.data[i * midCol + j] = this.data[(i + midRow) * rowLength + j];
+				A22.data[i * midCol + j] =
+					this.data[(i + midRow) * rowLength + j + midCol];
+			}
+		}
+
+		return [A11, A12, A21, A22];
 	}
 
 	static combineQuarters(C11, C12, C21, C22) {
-		const topHalf = C11.data.map((row, i) => row.concat(C12.data[i]));
-		const bottomHalf = C21.data.map((row, i) => row.concat(C22.data[i]));
-		const combinedData = topHalf.concat(bottomHalf);
-		return new Tensor(combinedData);
+		const m = C11.shape[0] + C21.shape[0];
+		const n = C11.shape[1] + C12.shape[1];
+		const combinedData = new C11.data.constructor(m * n);
+		const midRow = C11.shape[0];
+		const midCol = C11.shape[1];
+
+		for (let i = 0; i < m; i++) {
+			for (let j = 0; j < n; j++) {
+				if (i < midRow && j < midCol) {
+					combinedData[i * n + j] = C11.data[i * midCol + j];
+				} else if (i < midRow) {
+					combinedData[i * n + j] = C12.data[i * midCol + (j - midCol)];
+				} else if (j < midCol) {
+					combinedData[i * n + j] = C21.data[(i - midRow) * midCol + j];
+				} else {
+					combinedData[i * n + j] =
+						C22.data[(i - midRow) * midCol + (j - midCol)];
+				}
+			}
+		}
+
+		return new Tensor(combinedData, [m, n], C11.dtype);
 	}
+
 	slice(begin, size) {
 		if (
 			begin.length !== this.shape.length ||
@@ -171,11 +246,24 @@ class Tensor {
 				"Begin and size arrays must match the number of dimensions in the tensor"
 			);
 		}
-		let slicedData = this.data;
-		for (let i = 0; i < begin.length; i++) {
-			slicedData = slicedData.map((x) => x.slice(begin[i], begin[i] + size[i]));
+
+		const resultShape = size;
+		const totalElements = resultShape.reduce((a, b) => a * b, 1);
+		const resultData = new this.data.constructor(totalElements);
+		let offset = 0;
+
+		for (let i = 0; i < this.shape[0]; i++) {
+			if (i < begin[0] || i >= begin[0] + size[0]) continue;
+			const rowOffset = i * this.shape[1];
+
+			for (let j = 0; j < this.shape[1]; j++) {
+				if (j < begin[1] || j >= begin[1] + size[1]) continue;
+				resultData[offset] = this.data[rowOffset + j];
+				offset++;
+			}
 		}
-		return new Tensor(slicedData);
+
+		return new Tensor(resultData, resultShape, this.dtype);
 	}
 
 	reshape(newShape) {
@@ -187,31 +275,58 @@ class Tensor {
 				"New shape must be compatible with the total number of elements"
 			);
 		}
-		const flat = this.data.flat(Infinity);
-		const reshaped = Array.from({ length: newShape[0] }, (_, i) => {
-			const size = newShape.slice(1).reduce((a, b) => a * b, 1);
-			return flat.slice(i * size, (i + 1) * size);
-		});
-		return new Tensor(reshaped, newShape);
-	}
-	elementWise(operation) {
-		const applyOperation = (data) => {
-			if (Array.isArray(data)) {
-				return data.map((item) => applyOperation(item));
-			} else {
-				return operation(data);
-			}
-		};
 
-		return new Tensor(applyOperation(this.data), this.shape);
+		const totalElements = newShape.reduce((a, b) => a * b, 1);
+		if (totalElements !== this.data.length) {
+			throw new Error(
+				"Total number of elements must remain constant during reshape."
+			);
+		}
+
+		// Directly use the existing data since TypedArray does not need to be altered structurally
+		return new Tensor(this.data, newShape, this.dtype);
+	}
+
+	elementWise(operation, other) {
+		if (
+			this.shape.length !== other.shape.length ||
+			!this.shape.every((size, index) => size === other.shape[index])
+		) {
+			throw new Error("Shape mismatch for element-wise operation.");
+		}
+		const result = new this.data.constructor(this.data.length);
+		for (let i = 0; i < this.data.length; i++) {
+			result[i] = operation(this.data[i], other.data[i]);
+		}
+		return new Tensor(result, this.shape, this.dtype);
 	}
 
 	add(other) {
-		return this.elementWise((a, b) => a + b, other);
+		if (
+			this.shape.length !== other.shape.length ||
+			!this.shape.every((size, index) => size === other.shape[index])
+		) {
+			throw new Error("Shape mismatch for addition.");
+		}
+		const result = new this.data.constructor(this.data.length);
+		for (let i = 0; i < this.data.length; i++) {
+			result[i] = this.data[i] + other.data[i];
+		}
+		return new Tensor(result, this.shape, this.dtype);
 	}
 
 	subtract(other) {
-		return this.elementWise((a, b) => a - b, other);
+		if (
+			this.shape.length !== other.shape.length ||
+			!this.shape.every((size, index) => size === other.shape[index])
+		) {
+			throw new Error("Shape mismatch for subtraction.");
+		}
+		const result = new this.data.constructor(this.data.length);
+		for (let i = 0; i < this.data.length; i++) {
+			result[i] = this.data[i] - other.data[i];
+		}
+		return new Tensor(result, this.shape, this.dtype);
 	}
 
 	multiply(other) {
@@ -223,19 +338,18 @@ class Tensor {
 	}
 
 	reduce(operation, initial) {
-		const flatData = this.data.flat(Infinity);
-		return flatData.reduce(operation, initial);
+		return this.data.reduce(operation, initial);
 	}
 
 	sum() {
 		return this.reduce((acc, val) => acc + val, 0);
 	}
-	kahanSum(inputArray) {
+	kahanSum() {
 		let sum = 0.0;
 		let compensation = 0.0; // A running compensation for lost low-order bits.
 		let y, t;
 
-		for (const value of inputArray) {
+		for (const value of this.data) {
 			y = value - compensation; // So far, so good: compensation is zero.
 			t = sum + y; // Alas, sum is big, y small, so low-order digits of y are lost.
 			compensation = t - sum - y; // (t - sum) recovers the high-order part of y; subtracting y recovers -(low part of y)
@@ -245,50 +359,71 @@ class Tensor {
 	}
 
 	mean() {
-		return this.sum() / this.data.flat(Infinity).length;
+		return this.sum() / this.data.length;
 	}
 
 	max() {
-		return this.reduce((acc, val) => (acc > val ? acc : val), -Infinity);
+		return this.reduce((acc, val) => Math.max(acc, val), -Infinity);
 	}
 
 	min() {
-		return this.reduce((acc, val) => (acc < val ? acc : val), Infinity);
+		return this.reduce((acc, val) => Math.min(acc, val), Infinity);
 	}
 
 	clone() {
-		return new Tensor(JSON.parse(JSON.stringify(this.data)), [...this.shape]);
+		// Copy the underlying TypedArray data correctly
+		const clonedData = new this.data.constructor(this.data);
+		return new Tensor(clonedData, [...this.shape], this.dtype);
 	}
 
 	fill(value) {
-		const fillDeep = (arr, val) =>
-			arr.map((v) => (Array.isArray(v) ? fillDeep(v, val) : val));
-		this.data = fillDeep(this.data, value);
+		this.data.fill(value);
 		return this;
 	}
 
 	isEmpty() {
-		return (
-			this.data.length === 0 ||
-			this.data.every((item) => Array.isArray(item) && item.length === 0)
-		);
+		return this.data.length === 0;
 	}
 
 	normalize() {
 		const maxVal = this.max();
 		const minVal = this.min();
-		return this.elementWise((value) => (value - minVal) / (maxVal - minVal));
+		if (maxVal === minVal) {
+			// All elements are the same; avoid division by zero
+			this.data.fill(0); // or any other constant value deemed appropriate
+			return this;
+		}
+
+		const range = maxVal - minVal;
+		const data = new this.data.constructor(this.data.length);
+		for (let i = 0; i < this.data.length; i++) {
+			data[i] = (this.data[i] - minVal) / range;
+		}
+		return new Tensor(data, this.shape, this.dtype);
 	}
 
 	standardize() {
 		const meanVal = this.mean();
-		const variance =
-			this.reduce((acc, val) => acc + Math.pow(val - meanVal, 2), 0) /
-			this.data.flat(Infinity).length;
+		const totalElements = this.data.length;
+		let variance = 0;
+
+		for (let i = 0; i < totalElements; i++) {
+			let diff = this.data[i] - meanVal;
+			variance += diff * diff;
+		}
+		variance /= totalElements;
 		const stdDev = Math.sqrt(variance);
 
-		const standardizeFunction = (value) => (value - meanVal) / stdDev;
-		return this.elementWise(standardizeFunction, this.clone()); // Applying function element-wise to this tensor
+		if (stdDev === 0) {
+			return this.fill(0); // Handle case where all values are the same
+		}
+
+		const result = new this.data.constructor(totalElements);
+		for (let i = 0; i < totalElements; i++) {
+			result[i] = (this.data[i] - meanVal) / stdDev;
+		}
+
+		return new Tensor(result, this.shape, this.dtype);
 	}
 
 	luDecompose() {
@@ -296,42 +431,41 @@ class Tensor {
 			throw new Error("LU decomposition requires a square matrix.");
 		}
 		const n = this.shape[0];
-		const L = new Tensor(
-			Array.from({ length: n }, () => new Array(n).fill(0)),
-			[n, n]
-		);
-		const U = new Tensor(
-			Array.from({ length: n }, () => new Array(n).fill(0)),
-			[n, n]
-		);
+		const LData =
+			this.dtype === "float32"
+				? new Float32Array(n * n)
+				: new Float64Array(n * n);
+		const UData =
+			this.dtype === "float32"
+				? new Float32Array(n * n)
+				: new Float64Array(n * n);
+		const L = new Tensor(LData, [n, n], this.dtype);
+		const U = new Tensor(UData, [n, n], this.dtype);
 
-		// Iterate over each row
+		// Initialize L as identity matrix and U as zero matrix
 		for (let i = 0; i < n; i++) {
-			// Form the Upper Triangular matrix U
+			L.data[i * n + i] = 1;
+			for (let j = 0; j < n; j++) {
+				U.data[i * n + j] = 0;
+			}
+		}
+
+		for (let i = 0; i < n; i++) {
+			// Calculate U
 			for (let j = i; j < n; j++) {
 				let sum = 0;
 				for (let k = 0; k < i; k++) {
-					sum += L.data[i][k] * U.data[k][j];
+					sum += L.data[i * n + k] * U.data[k * n + j];
 				}
-				U.data[i][j] = this.data[i][j] - sum;
+				U.data[i * n + j] = this.data[i * n + j] - sum;
 			}
-
-			// Form the Lower Triangular matrix L
-			for (let j = i; j < n; j++) {
-				if (i == j) {
-					L.data[i][i] = 1; // Diagonal entries of L are set to 1
-				} else {
-					let sum = 0;
-					for (let k = 0; k < i; k++) {
-						sum += L.data[j][k] * U.data[k][i];
-					}
-					if (U.data[i][i] === 0) {
-						throw new Error(
-							"Zero pivot encountered, cannot proceed with decomposition."
-						);
-					}
-					L.data[j][i] = (this.data[j][i] - sum) / U.data[i][i];
+			// Calculate L
+			for (let j = i + 1; j < n; j++) {
+				let sum = 0;
+				for (let k = 0; k < i; k++) {
+					sum += L.data[j * n + k] * U.data[k * n + i];
 				}
+				L.data[j * n + i] = (this.data[j * n + i] - sum) / U.data[i * n + i];
 			}
 		}
 
@@ -339,60 +473,39 @@ class Tensor {
 	}
 
 	qrDecompose() {
-		if (this.shape.length !== 2 || this.shape[0] < this.shape[1]) {
-			throw new Error(
-				"QR decomposition requires a matrix with more rows than or equal to columns."
-			);
-		}
-
-		let m = this.shape[0];
-		let n = this.shape[1];
-		let Q = new Tensor(
-			Array.from({ length: m }, () => new Array(m).fill(0)),
-			[m, m]
-		);
-		let R = new Tensor(
-			Array.from({ length: m }, () => new Array(n).fill(0)),
-			[m, n]
-		);
+		const m = this.shape[0];
+		const n = this.shape[1];
+		let Q = Tensor.identity(m, this.dtype); // Start with identity for Q
+		let R = new Tensor(new this.data.constructor(m * n), [m, n], this.dtype);
 
 		for (let k = 0; k < n; k++) {
-			// Compute the norm of the k-th column vector
 			let norm = 0;
-			for (let i = k; i < m; i++) {
-				norm += this.data[i][k] ** 2;
+			// Calculate the norm of the k-th column
+			for (let i = 0; i < m; i++) {
+				norm += this.data[i * n + k] ** 2;
 			}
 			norm = Math.sqrt(norm);
 
-			// Form k-th Householder vector
-			let u_k = new Array(m).fill(0);
-			for (let i = 0; i < k; i++) {
-				u_k[i] = 0;
+			// Normalize the k-th column and assign to R
+			for (let i = 0; i <= k; i++) {
+				R.data[i * n + k] = i === k ? norm : 0;
 			}
-			for (let i = k; i < m; i++) {
-				u_k[i] =
-					i === k
-						? this.data[i][k] + Math.sign(this.data[k][k]) * norm
-						: this.data[i][k];
-			}
-			let u_norm = Math.sqrt(u_k.reduce((acc, val) => acc + val ** 2, 0));
-			u_k = u_k.map((x) => x / u_norm);
 
-			// Update R and the matrix to be decomposed
-			for (let i = k; i < n; i++) {
+			// Normalize the column in the original matrix to form Q
+			for (let i = 0; i < m; i++) {
+				Q.data[i * m + k] = this.data[i * n + k] / norm;
+			}
+
+			// Orthogonalize remaining columns
+			for (let j = k + 1; j < n; j++) {
 				let dot = 0;
-				for (let j = k; j < m; j++) {
-					dot += this.data[j][i] * u_k[j];
+				for (let i = 0; i < m; i++) {
+					dot += Q.data[i * m + k] * this.data[i * n + j];
 				}
-				for (let j = k; j < m; j++) {
-					this.data[j][i] -= 2 * u_k[j] * dot;
+				for (let i = 0; i < m; i++) {
+					this.data[i * n + j] -= dot * Q.data[i * m + k];
 				}
 			}
-			for (let i = k; i < m; i++) {
-				R.data[i][k] = 0;
-				Q.data[i][k] = u_k[i];
-			}
-			R.data[k][k] = norm;
 		}
 
 		return { Q, R };
@@ -404,18 +517,17 @@ class Tensor {
 		}
 
 		let A = this.clone();
-		let Q = Tensor.identity(this.shape[0]);
+		let Q = Tensor.identity(this.shape[0], this.dtype);
 
 		for (let i = 0; i < maxIter; i++) {
 			let { Q: Q1, R } = A.qrDecompose();
 			A = R.matMul(Q1);
 			Q = Q.matMul(Q1);
 
-			// Check for convergence: if off-diagonal elements are all small enough
 			let isConverged = true;
 			for (let row = 0; row < A.shape[0]; row++) {
 				for (let col = 0; col < row; col++) {
-					if (Math.abs(A.data[row][col]) > tolerance) {
+					if (Math.abs(A.data[row * A.shape[1] + col]) > tolerance) {
 						isConverged = false;
 						break;
 					}
@@ -426,19 +538,29 @@ class Tensor {
 			if (isConverged) break;
 		}
 
+		// Ensure eigenvalues are returned as a TypedArray
+		let eigenvalues = new this.data.constructor(A.shape[0]);
+		for (let i = 0; i < A.shape[0]; i++) {
+			eigenvalues[i] = A.data[i * A.shape[1] + i];
+		}
+
 		return {
-			eigenvalues: A.data.map((row, idx) => row[idx]),
+			eigenvalues: eigenvalues,
 			eigenvectors: Q,
 		};
 	}
 
-	static identity(size) {
-		return new Tensor(
-			Array.from({ length: size }, (_, i) =>
-				Array.from({ length: size }, (_, j) => (i === j ? 1 : 0))
-			),
-			[size, size]
-		);
+	static identity(size, dtype = "float64") {
+		let data;
+		if (dtype === "float32") {
+			data = new Float32Array(size * size);
+		} else {
+			data = new Float64Array(size * size);
+		}
+		for (let i = 0; i < size; i++) {
+			data[i * size + i] = 1;
+		}
+		return new Tensor(data, [size, size], dtype);
 	}
 
 	svd() {
@@ -446,69 +568,77 @@ class Tensor {
 			throw new Error("SVD can only be applied to 2D matrices.");
 		}
 
-		// Assuming A is m x n
 		let m = this.shape[0];
 		let n = this.shape[1];
-
-		// Step 1: Compute A^T A to find V
 		let AT = this.transpose();
 		let ATA = AT.matMul(this);
-
-		// Compute eigenvalues and eigenvectors of A^T A
 		let { eigenvalues: sigmaSquared, eigenvectors: V } = ATA.qrAlgorithm();
 
 		// The singular values are the square roots of the eigenvalues of A^T A
-		let sigma = sigmaSquared.map((value) => Math.sqrt(value));
+		let sigma = new (this.dtype === "float32" ? Float32Array : Float64Array)(
+			sigmaSquared.length
+		);
+		for (let i = 0; i < sigmaSquared.length; i++) {
+			sigma[i] = Math.sqrt(sigmaSquared[i]);
+		}
 
-		// Step 2: Compute AA^T to find U
 		let AAT = this.matMul(AT);
 		let { eigenvectors: U } = AAT.qrAlgorithm();
-
-		// Create Sigma matrix (diagonal matrix of singular values)
-		let Sigma = new Tensor(
-			Array.from({ length: m }, (_, i) =>
-				Array.from({ length: n }, (_, j) => (i === j ? sigma[i] : 0))
-			),
-			[m, n]
-		);
+		let SigmaData = new (
+			this.dtype === "float32" ? Float32Array : Float64Array
+		)(m * n);
+		for (let i = 0; i < Math.min(m, n); i++) {
+			SigmaData[i * n + i] = sigma[i];
+		}
+		let Sigma = new Tensor(SigmaData, [m, n], this.dtype);
 
 		return { U, Sigma, V };
 	}
+
 	inverse() {
 		if (this.shape.length !== 2 || this.shape[0] !== this.shape[1]) {
 			throw new Error("Inverse can only be applied to square matrices.");
 		}
 
-		const { L, U } = this.luDecompose();
 		const n = this.shape[0];
-		const inv = new Tensor(
-			Array.from({ length: n }, () => new Array(n).fill(0)),
-			[n, n]
-		);
+		let A = this.clone(); // Clone to avoid modifying original data
+		let inv = Tensor.identity(n, this.dtype);
 
-		// Solve L * Y = I (Forward substitution)
+		// Perform Gauss-Jordan Elimination
 		for (let i = 0; i < n; i++) {
-			for (let j = 0; j <= i; j++) {
-				if (i == j) {
-					inv.data[i][j] = 1; // Diagonal entries are 1 in L
-				} else {
-					let sum = 0;
-					for (let k = 0; k < j; k++) {
-						sum += L.data[i][k] * inv.data[k][j];
-					}
-					inv.data[i][j] = -sum; // Non-diagonal entries computation
+			// Find the row with the maximum element in the current column
+			let maxRow = i;
+			for (let j = i + 1; j < n; j++) {
+				if (Math.abs(A.data[j * n + i]) > Math.abs(A.data[maxRow * n + i])) {
+					maxRow = j;
 				}
 			}
-		}
 
-		// Solve U * X = Y (Backward substitution)
-		for (let i = n - 1; i >= 0; i--) {
-			for (let j = n - 1; j >= i; j--) {
-				let sum = 0;
-				for (let k = i + 1; k <= j; k++) {
-					sum += U.data[i][k] * inv.data[k][j];
+			// Swap the maximum row with the current row
+			if (i !== maxRow) {
+				A.swapRows(i, maxRow);
+				inv.swapRows(i, maxRow);
+			}
+
+			// Scale the row to make the diagonal element 1
+			const factor = A.data[i * n + i];
+			if (factor === 0) {
+				throw new Error("Matrix is singular and cannot be inverted.");
+			}
+			for (let j = 0; j < n; j++) {
+				A.data[i * n + j] /= factor;
+				inv.data[i * n + j] /= factor;
+			}
+
+			// Eliminate all other entries in this column
+			for (let j = 0; j < n; j++) {
+				if (j !== i) {
+					const factor = A.data[j * n + i];
+					for (let k = 0; k < n; k++) {
+						A.data[j * n + k] -= A.data[i * n + k] * factor;
+						inv.data[j * n + k] -= inv.data[i * n + k] * factor;
+					}
 				}
-				inv.data[i][j] = (inv.data[i][j] - sum) / U.data[i][i];
 			}
 		}
 
@@ -519,90 +649,96 @@ class Tensor {
 		if (this.shape.length !== 2) {
 			throw new Error("Pseudo-inverse can only be applied to 2D matrices.");
 		}
-		// Compute SVD
-		const { U, Sigma, V } = this.svd();
 
-		// Calculate Sigma^+
+		const { U, Sigma, V } = this.svd();
 		const m = Sigma.shape[0];
 		const n = Sigma.shape[1];
-		const SigmaPlus = new Tensor(
-			Array.from({ length: n }, () => new Array(m).fill(0)),
-			[n, m]
-		);
+		const sigmaPlusData = new (
+			this.dtype === "float32" ? Float32Array : Float64Array
+		)(n * m);
+		const SigmaPlus = new Tensor(sigmaPlusData, [n, m], this.dtype);
 
 		for (let i = 0; i < Math.min(m, n); i++) {
-			if (Sigma.data[i][i] !== 0) {
-				SigmaPlus.data[i][i] = 1 / Sigma.data[i][i];
+			const sigmaValue = Sigma.data[i * n + i];
+			if (sigmaValue !== 0) {
+				SigmaPlus.data[i * n + i] = 1 / sigmaValue;
 			}
 		}
 
-		// V * Sigma^+ * U^T
 		const VSigmaPlus = V.matMul(SigmaPlus);
 		const pseudoInv = VSigmaPlus.matMul(U.transpose());
 		return pseudoInv;
 	}
+
 	// Assume f is an array of functions and this Tensor is an array of variables
 	computeJacobian(f) {
 		if (this.shape.length !== 1) {
 			throw new Error("Input for Jacobian computation must be a 1D Tensor.");
 		}
 		let vars = this.data;
-		let jacobian = new Tensor(
-			new Array(f.length).fill(0).map(() => new Array(vars.length).fill(0)),
-			[f.length, vars.length]
-		);
-
+		const numRows = f.length;
+		const numCols = vars.length;
+		const jacobianData =
+			this.dtype === "float32"
+				? new Float32Array(numRows * numCols)
+				: new Float64Array(numRows * numCols);
+		let jacobian = new Tensor(jacobianData, [numRows, numCols], this.dtype);
 		const h = 1e-4; // step size
-		for (let i = 0; i < f.length; i++) {
-			for (let j = 0; j < vars.length; j++) {
-				let vars_plus = [...vars];
-				let vars_minus = [...vars];
+		for (let i = 0; i < numRows; i++) {
+			for (let j = 0; j < numCols; j++) {
+				let vars_plus = new this.data.constructor(vars); // Copy vars array
+				let vars_minus = new this.data.constructor(vars); // Copy vars array
 				vars_plus[j] += h;
 				vars_minus[j] -= h;
-				jacobian.data[i][j] =
+				jacobian.data[i * numCols + j] =
 					(f[i](...vars_plus) - f[i](...vars_minus)) / (2 * h);
 			}
 		}
 		return jacobian;
 	}
+
 	// Assume f is a function and this Tensor is an array of variables
 	computeHessian(f) {
 		if (this.shape.length !== 1) {
 			throw new Error("Input for Hessian computation must be a 1D Tensor.");
 		}
 		let vars = this.data;
-		let hessian = new Tensor(
-			new Array(vars.length).fill(0).map(() => new Array(vars.length).fill(0)),
-			[vars.length, vars.length]
-		);
+		const numVars = vars.length;
+		const hessianData =
+			this.dtype === "float32"
+				? new Float32Array(numVars * numVars)
+				: new Float64Array(numVars * numVars);
+		let hessian = new Tensor(hessianData, [numVars, numVars], this.dtype);
 
 		const h = 1e-4; // step size
-		for (let i = 0; i < vars.length; i++) {
-			for (let j = 0; j < vars.length; j++) {
-				let vars_ij = [...vars];
-				let vars_i = [...vars];
-				let vars_j = [...vars];
-				let vars_0 = [...vars];
+		for (let i = 0; i < numVars; i++) {
+			for (let j = 0; j < numVars; j++) {
+				let vars_ij = new this.data.constructor(vars); // Copy vars array
+				let vars_i = new this.data.constructor(vars); // Copy vars array
+				let vars_j = new this.data.constructor(vars); // Copy vars array
+				let vars_0 = new this.data.constructor(vars); // Copy vars array
 				vars_ij[i] += h;
 				vars_ij[j] += h;
 				vars_i[i] += h;
 				vars_j[j] += h;
-				hessian.data[i][j] =
+				hessian.data[i * numVars + j] =
 					(f(...vars_ij) - f(...vars_i) - f(...vars_j) + f(...vars_0)) /
 					(h * h);
 			}
 		}
 		return hessian;
 	}
+
 	powerIteration(maxIter = 100, tolerance = 1e-6) {
 		if (this.shape.length !== 2 || this.shape[0] !== this.shape[1]) {
 			throw new Error("Matrix must be square for eigenvalue computation.");
 		}
-
-		let b_k = new Tensor(
-			Array.from({ length: this.shape[0] }, () => [Math.random()]),
-			[this.shape[0], 1]
-		);
+		const size = this.shape[0];
+		let b_kData =
+			this.dtype === "float32"
+				? new Float32Array(size).fill(Math.random())
+				: new Float64Array(size).fill(Math.random());
+		let b_k = new Tensor(b_kData, [size, 1], this.dtype);
 		let b_k1,
 			lambda,
 			oldLambda = 0;
@@ -612,14 +748,15 @@ class Tensor {
 			let Ab_k = this.matMul(b_k);
 
 			// Normalize b_k1
-			let norm = Math.sqrt(Ab_k.reduce((acc, val) => acc + val[0] ** 2, 0));
-			b_k1 = new Tensor(
-				Ab_k.data.map((row) => [row[0] / norm]),
-				[this.shape[0], 1]
-			);
+			let norm = Math.sqrt(Ab_k.data.reduce((acc, val) => acc + val ** 2, 0));
+			let normalizedData = new this.data.constructor(size);
+			for (let j = 0; j < size; j++) {
+				normalizedData[j] = Ab_k.data[j] / norm;
+			}
+			b_k1 = new Tensor(normalizedData, [size, 1], this.dtype);
 
 			// Rayleigh quotient for the eigenvalue
-			lambda = b_k1.transpose().matMul(this).matMul(b_k1).data[0][0];
+			lambda = b_k1.transpose().matMul(this).matMul(b_k1).data[0];
 
 			// Check convergence
 			if (Math.abs(lambda - oldLambda) < tolerance) {
@@ -632,6 +769,7 @@ class Tensor {
 
 		return { eigenvalue: lambda, eigenvector: b_k };
 	}
+
 	isSymmetric() {
 		if (this.shape.length !== 2 || this.shape[0] !== this.shape[1]) {
 			return false; // Non-square matrices cannot be symmetric.
@@ -639,7 +777,9 @@ class Tensor {
 		for (let i = 0; i < this.shape[0]; i++) {
 			for (let j = 0; j < i; j++) {
 				// Check only half since symmetric
-				if (this.data[i][j] !== this.data[j][i]) {
+				if (
+					this.data[i * this.shape[1] + j] !== this.data[j * this.shape[1] + i]
+				) {
 					return false;
 				}
 			}
@@ -652,7 +792,7 @@ class Tensor {
 		}
 		for (let i = 0; i < this.shape[0]; i++) {
 			for (let j = 0; j < this.shape[0]; j++) {
-				if (i !== j && this.data[i][j] !== 0) {
+				if (i !== j && this.data[i * this.shape[1] + j] !== 0) {
 					return false;
 				}
 			}
@@ -663,7 +803,7 @@ class Tensor {
 		if (this.shape.length !== 2 || this.shape[0] !== this.shape[1]) {
 			return false;
 		}
-		const transpose = this.transpose().clone();
+		const transpose = this.transpose();
 		const identity = this.matMul(transpose);
 
 		return identity.isIdentity();
@@ -675,8 +815,8 @@ class Tensor {
 		for (let i = 0; i < this.shape[0]; i++) {
 			for (let j = 0; j < this.shape[0]; j++) {
 				if (
-					(i === j && this.data[i][j] !== 1) ||
-					(i !== j && this.data[i][j] !== 0)
+					(i === j && this.data[i * this.shape[1] + j] !== 1) ||
+					(i !== j && this.data[i * this.shape[1] + j] !== 0)
 				) {
 					return false;
 				}
@@ -691,18 +831,208 @@ function assert(condition, message) {
 		throw new Error(message || "Assertion failed");
 	}
 }
-
+function arraysEqual(a, b) {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+function arraysAlmostEqual(a, b, tolerance = 1e-6) {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (Math.abs(a[i] - b[i]) > tolerance) return false;
+	}
+	return true;
+}
 function testTensorCreation() {
 	const data = [
 		[1, 2],
 		[3, 4],
 	];
 	const tensor = new Tensor(data);
+	const flatData = new Float64Array([1, 2, 3, 4]); // Assuming dtype is float64
 	assert(
-		JSON.stringify(tensor.data) === JSON.stringify(data),
+		arraysEqual(tensor.data, flatData),
 		"Failed to create tensor with correct data"
 	);
 	console.log("testTensorCreation passed.");
+}
+function testAdd() {
+	const tensor1 = new Tensor([1, 2, 3]);
+	const tensor2 = new Tensor([4, 5, 6]);
+	const result = tensor1.add(tensor2);
+	const expected = new Float64Array([5, 7, 9]);
+	assert(arraysEqual(result.data, expected), "Addition failed");
+	console.log("testAdd passed.");
+}
+
+function testSubtract() {
+	const tensor1 = new Tensor([10, 20, 30]);
+	const tensor2 = new Tensor([1, 2, 3]);
+	const result = tensor1.subtract(tensor2);
+	const expected = new Float64Array([9, 18, 27]);
+	assert(arraysEqual(result.data, expected), "Subtraction failed");
+	console.log("testSubtract passed.");
+}
+
+function testMultiply() {
+	const tensor1 = new Tensor([1, 2, 3]);
+	const tensor2 = new Tensor([4, 5, 6]);
+	const result = tensor1.multiply(tensor2);
+	const expected = new Float64Array([4, 10, 18]);
+	assert(
+		arraysEqual(result.data, expected),
+		"Element-wise multiplication failed"
+	);
+	console.log("testMultiply passed.");
+}
+
+function testDivide() {
+	const tensor1 = new Tensor([10, 20, 30]);
+	const tensor2 = new Tensor([2, 4, 5]);
+	const result = tensor1.divide(tensor2);
+	const expected = new Float64Array([5, 5, 6]);
+	assert(arraysEqual(result.data, expected), "Element-wise division failed");
+	console.log("testDivide passed.");
+}
+
+function testMax() {
+	const tensor = new Tensor([1, 3, 2, 8, 5]);
+	const result = tensor.max();
+	assert(result === 8, "Maximum value incorrect");
+	console.log("testMax passed.");
+}
+
+function testMin() {
+	const tensor = new Tensor([10, 3, 2, 8, 5]);
+	const result = tensor.min();
+	assert(result === 2, "Minimum value incorrect");
+	console.log("testMin passed.");
+}
+
+function testSum() {
+	const tensor = new Tensor([1, 2, 3, 4]);
+	const result = tensor.sum();
+	assert(result === 10, "Sum calculation failed");
+	console.log("testSum passed.");
+}
+
+function testKahanSum() {
+	const tensor = new Tensor([0.1, 0.2, 0.3]);
+	const result = tensor.kahanSum();
+	assert(Math.abs(result - 0.6) < 1e-15, "Kahan sum calculation failed");
+	console.log("testKahanSum passed.");
+}
+
+function testIsEmpty() {
+	const tensor = new Tensor([]);
+	assert(
+		tensor.isEmpty() === true,
+		"IsEmpty should return true for empty tensor"
+	);
+	console.log("testIsEmpty passed.");
+}
+
+function testFill() {
+	const tensor = new Tensor([1, 2, 3, 4, 5]);
+	tensor.fill(0);
+	const expected = new Float64Array([0, 0, 0, 0, 0]);
+	assert(arraysEqual(tensor.data, expected), "Fill method failed");
+	console.log("testFill passed.");
+}
+
+function testClone() {
+	const tensor = new Tensor([1, 2, 3]);
+	const clonedTensor = tensor.clone();
+	assert(
+		arraysEqual(tensor.data, clonedTensor.data) &&
+			tensor.shape[0] === clonedTensor.shape[0],
+		"Clone method failed"
+	);
+	console.log("testClone passed.");
+}
+
+function testIsSymmetric() {
+	const symmetricTensor = new Tensor([
+		[1, 2, 3],
+		[2, 5, 6],
+		[3, 6, 9],
+	]);
+	const nonSymmetricTensor = new Tensor([
+		[1, 0, 3],
+		[2, 5, 6],
+		[4, 6, 9],
+	]);
+	assert(
+		symmetricTensor.isSymmetric(),
+		"Symmetric check failed for symmetric matrix"
+	);
+	assert(
+		!nonSymmetricTensor.isSymmetric(),
+		"Symmetric check failed for non-symmetric matrix"
+	);
+	console.log("testIsSymmetric passed.");
+}
+
+function testIsDiagonal() {
+	const diagonalTensor = new Tensor([
+		[1, 0, 0],
+		[0, 5, 0],
+		[0, 0, 9],
+	]);
+	const nonDiagonalTensor = new Tensor([
+		[1, 2, 0],
+		[0, 5, 0],
+		[0, 0, 9],
+	]);
+	assert(
+		diagonalTensor.isDiagonal(),
+		"Diagonal check failed for diagonal matrix"
+	);
+	assert(
+		!nonDiagonalTensor.isDiagonal(),
+		"Diagonal check failed for non-diagonal matrix"
+	);
+	console.log("testIsDiagonal passed.");
+}
+
+function testIsOrthogonal() {
+	const orthogonalTensor = new Tensor([
+		[1, 0],
+		[0, 1],
+	]);
+	const nonOrthogonalTensor = new Tensor([
+		[1, 2],
+		[2, 3],
+	]);
+	assert(
+		orthogonalTensor.isOrthogonal(),
+		"Orthogonal check failed for orthogonal matrix"
+	);
+	assert(
+		!nonOrthogonalTensor.isOrthogonal(),
+		"Orthogonal check failed for non-orthogonal matrix"
+	);
+	console.log("testIsOrthogonal passed.");
+}
+
+function testIsIdentity() {
+	const identityTensor = Tensor.identity(3, "float64");
+	const nonIdentityTensor = new Tensor([
+		[1, 0, 0],
+		[0, 1, 0],
+		[0, 0, 0],
+	]);
+	assert(
+		identityTensor.isIdentity(),
+		"Identity check failed for identity matrix"
+	);
+	assert(
+		!nonIdentityTensor.isIdentity(),
+		"Identity check failed for non-identity matrix"
+	);
+	console.log("testIsIdentity passed.");
 }
 
 function testTranspose() {
@@ -712,14 +1042,8 @@ function testTranspose() {
 	];
 	const tensor = new Tensor(data);
 	const transposed = tensor.transpose();
-	const expected = [
-		[1, 3],
-		[2, 4],
-	];
-	assert(
-		JSON.stringify(transposed.data) === JSON.stringify(expected),
-		"Transpose failed"
-	);
+	const expected = new Float64Array([1, 3, 2, 4]);
+	assert(arraysEqual(transposed.data, expected), "Transpose failed");
 	console.log("testTranspose passed.");
 }
 
@@ -735,14 +1059,8 @@ function testMatMul() {
 	];
 	const tensorB = new Tensor(dataB);
 	const product = tensorA.matMul(tensorB);
-	const expected = [
-		[4, 4],
-		[10, 8],
-	];
-	assert(
-		JSON.stringify(product.data) === JSON.stringify(expected),
-		"Matrix multiplication failed"
-	);
+	const expected = new Float64Array([4, 4, 10, 8]);
+	assert(arraysEqual(product.data, expected), "Matrix multiplication failed");
 	console.log("testMatMul passed.");
 }
 
@@ -758,12 +1076,9 @@ function testStrassenMatMul() {
 	];
 	const tensorB = new Tensor(dataB);
 	const product = tensorA.strassenMatMul(tensorB);
-	const expected = [
-		[4, 4],
-		[10, 8],
-	]; // Expecting same result as standard multiplication for small matrices
+	const expected = new Float64Array([4, 4, 10, 8]); // Flat array to match TypedArray output
 	assert(
-		JSON.stringify(product.data) === JSON.stringify(expected),
+		arraysEqual(product.data, expected),
 		"Strassen Matrix multiplication failed"
 	);
 	console.log("testStrassenMatMul passed.");
@@ -777,23 +1092,77 @@ function testLUdecompose() {
 	];
 	const tensor = new Tensor(data);
 	const { L, U } = tensor.luDecompose();
-	const expectedL = [
-		[1, 0, 0],
-		[4, 1, 0],
-		[4, 0.5, 1],
-	];
-	const expectedU = [
-		[1, 2, 2],
-		[0, -4, -6],
-		[0, 0, -1],
-	];
-	console.log(L, U);
+	const expectedL = new Float64Array([1, 0, 0, 4, 1, 0, 4, 0.5, 1]); // Flat array
+	const expectedU = new Float64Array([1, 2, 2, 0, -4, -6, 0, 0, -1]);
 	assert(
-		JSON.stringify(L.data) === JSON.stringify(expectedL) &&
-			JSON.stringify(U.data) === JSON.stringify(expectedU),
+		arraysEqual(L.data, expectedL) && arraysEqual(U.data, expectedU),
 		"LU decomposition failed"
 	);
 	console.log("testLUdecompose passed.");
+}
+function testQRDecomposition() {
+	const data = [
+		[12, -51, 4],
+		[6, 167, -68],
+		[-4, 24, -41],
+	];
+	const tensor = new Tensor(data);
+	const { Q, R } = tensor.qrDecompose();
+
+	// Log calculated Q and R matrices
+	console.log("Calculated Q:", Q.data, "Shape:", Q.shape);
+	console.log("Calculated R:", R.data, "Shape:", R.shape);
+
+	// Verify Q is orthogonal: Q * Q^T = I
+	const identityExpected = Tensor.identity(Q.shape[0], Q.dtype);
+	const QQt = Q.matMul(Q.transpose());
+
+	// Log the matrix Q * Q^T to check if it is the identity matrix
+	console.log("Q * Q^T (Should be Identity):", QQt.data);
+
+	assert(
+		arraysAlmostEqual(QQt.data, identityExpected.data, 1e-6),
+		"Q is not orthogonal"
+	);
+
+	// Verify R is upper triangular
+	let upperTriangular = true;
+	for (let i = 0; i < R.shape[0]; i++) {
+		for (let j = 0; j < i; j++) {
+			if (Math.abs(R.data[i * R.shape[1] + j]) > 1e-6) {
+				console.log(
+					`R[${i},${j}] is not zero as expected: `,
+					R.data[i * R.shape[1] + j]
+				);
+				upperTriangular = false;
+			}
+		}
+	}
+	assert(upperTriangular, "R is not upper triangular");
+
+	console.log("testQRDecomposition passed.");
+}
+function testQRAlgorithm() {
+	// Use a simple symmetric matrix for which eigenvalues and eigenvectors are straightforward to compute
+	const data = [
+		[2, -1, 0],
+		[-1, 2, -1],
+		[0, -1, 2],
+	];
+	const tensor = new Tensor(data);
+	const { eigenvalues, eigenvectors } = tensor.qrAlgorithm();
+
+	// Known eigenvalues for this tridiagonal matrix are approximately [3.414, 2, 0.586]
+	const expectedEigenvalues = new Float64Array([3.414, 2, 0.586]).sort();
+	const computedEigenvalues = Array.from(eigenvalues).sort();
+
+	// Checking the accuracy of eigenvalues
+	assert(
+		arraysAlmostEqual(computedEigenvalues, expectedEigenvalues, 1e-3),
+		"Eigenvalues do not match expected values"
+	);
+
+	console.log("testQRAlgorithm passed.");
 }
 
 function testInverse() {
@@ -803,20 +1172,59 @@ function testInverse() {
 	];
 	const tensor = new Tensor(data);
 	const inverse = tensor.inverse();
-	const expected = [
-		[0.6, -0.7],
-		[-0.2, 0.4],
-	];
-	console.log("Computed inverse:", inverse.data);
-	console.log("Expected inverse:", expected);
+	const expected = new Float64Array([0.6, -0.7, -0.2, 0.4]);
+
+	// Use arraysAlmostEqual for comparison
 	assert(
-		JSON.stringify(
-			inverse.data.map((row) => row.map((x) => parseFloat(x.toFixed(1))))
-		) === JSON.stringify(expected),
+		arraysAlmostEqual(inverse.data, expected),
 		"Inverse calculation failed"
 	);
 
 	console.log("testInverse passed.");
+}
+function testSVD() {
+	// Simple 2x2 matrix
+	const data = [
+		[3, 2],
+		[2, 3],
+	];
+	const tensor = new Tensor(data);
+	const { U, Sigma, V } = tensor.svd();
+
+	// Expected values (based on known SVD results or calculated manually)
+	const expectedSigma = new Float64Array([5, 1]); // Singular values for this matrix
+	const expectedU = new Float64Array([
+		// U should be orthogonal
+		0.7071067811865475, 0.7071067811865475, 0.7071067811865475,
+		-0.7071067811865475,
+	]);
+	const expectedV = new Float64Array([
+		// V should be orthogonal
+		0.7071067811865475, 0.7071067811865475, 0.7071067811865475,
+		-0.7071067811865475,
+	]);
+	console.log("calculated s:", Sigma, "u:", U, "v:", V);
+	// Check if U and V are orthogonal and Sigma contains the correct singular values
+	assert(
+		arraysAlmostEqual(
+			U.multiply(U.transpose()).data,
+			Tensor.identity(2, tensor.dtype).data
+		),
+		"U is not orthogonal"
+	);
+	assert(
+		arraysAlmostEqual(
+			V.multiply(V.transpose()).data,
+			Tensor.identity(2, tensor.dtype).data
+		),
+		"V is not orthogonal"
+	);
+	assert(
+		arraysAlmostEqual(Sigma.data, expectedSigma, 1e-6),
+		"Sigma does not contain expected singular values"
+	);
+
+	console.log("testSVD passed.");
 }
 
 function testPseudoInverse() {
@@ -826,40 +1234,36 @@ function testPseudoInverse() {
 	];
 	const tensor = new Tensor(data);
 	const pseudoInverse = tensor.pseudoInverse();
-	const expected = [
-		[-17 / 18, 8 / 9],
-		[-2 / 9, 1 / 9],
-		[13 / 18, -4 / 9],
-	];
+	const expected = new Float64Array([
+		-17 / 18,
+		8 / 9,
+		-2 / 9,
+		1 / 9,
+		13 / 18,
+		-4 / 9,
+	]);
+	console.log("calculated p-inverse", pseudoInverse);
+	console.log("expected p-inverse", expected);
 	assert(
-		JSON.stringify(
-			pseudoInverse.data.map((row) => row.map((x) => parseFloat(x.toFixed(2))))
-		) === JSON.stringify(expected),
+		arraysEqual(
+			pseudoInverse.data,
+			expected.map((x) => parseFloat(x.toFixed(2)))
+		),
 		"Pseudo-inverse calculation failed"
 	);
 	console.log("testPseudoInverse passed.");
-}
-function testQRDecompose() {
-	const data = [
-		[12, -51, 4],
-		[6, 167, -68],
-		[-4, 24, -41],
-	];
-	const tensor = new Tensor(data);
-	const { Q, R } = tensor.qrDecompose();
-	console.log("Q:", Q.data, "R:", R.data);
-	assert(Q.isOrthogonal() && R.data[0][0] > 0, "QR decomposition failed");
-	console.log("testQRDecompose passed.");
 }
 
 function testNormalize() {
 	const data = [1, 2, 3, 4, 5];
 	const tensor = new Tensor(data);
 	const normalized = tensor.normalize();
-	const expected = [0, 0.25, 0.5, 0.75, 1.0];
+	const expected = new Float64Array([0, 0.25, 0.5, 0.75, 1.0]);
 	assert(
-		JSON.stringify(normalized.data.map((x) => parseFloat(x.toFixed(2)))) ===
-			JSON.stringify(expected),
+		arraysEqual(
+			normalized.data,
+			expected.map((x) => parseFloat(x.toFixed(2)))
+		),
 		"Normalization failed"
 	);
 	console.log("testNormalize passed.");
@@ -869,11 +1273,11 @@ function testStandardize() {
 	const data = [1, 2, 3, 4, 5];
 	const tensor = new Tensor(data);
 	const standardized = tensor.standardize();
-	console.log("Standardized Data:", standardized.data);
 	assert(
-		standardized.mean().toFixed(2) === "0.00",
+		Math.abs(standardized.mean()) < 1e-10, // Checking mean close to zero due to potential floating-point precision issues
 		"Standardization failed to normalize mean"
 	);
+	//console.log("Standardized Data:", standardized.data);
 	console.log("testStandardize passed.");
 }
 
@@ -881,26 +1285,38 @@ function testReshape() {
 	const data = [1, 2, 3, 4, 5, 6];
 	const tensor = new Tensor(data);
 	const reshaped = tensor.reshape([2, 3]);
-	const expected = [
-		[1, 2, 3],
-		[4, 5, 6],
-	];
-	assert(
-		JSON.stringify(reshaped.data) === JSON.stringify(expected),
-		"Reshape failed"
-	);
+	const expected = new Float64Array([1, 2, 3, 4, 5, 6]);
+	assert(arraysEqual(reshaped.data, expected), "Reshape failed");
 	console.log("testReshape passed.");
 }
 
 function runAllTests() {
 	testTensorCreation();
+
+	testAdd();
+	testSubtract();
+	testMultiply();
+	testDivide();
+	testMax();
+	testMin();
+	testSum();
+	testKahanSum();
+	testIsEmpty();
+	testFill();
+	testClone();
+	testIsSymmetric();
+	testIsDiagonal();
+	testIsOrthogonal();
 	testTranspose();
 	testMatMul();
 	testStrassenMatMul();
 	testLUdecompose();
-	//testInverse();
+	testInverse();
+	testQRDecomposition();
+	testQRAlgorithm();
+	//testSVD();
 	//testPseudoInverse();
-	testQRDecompose();
+
 	testNormalize();
 	testStandardize();
 	testReshape();
