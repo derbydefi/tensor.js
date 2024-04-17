@@ -1,6 +1,6 @@
 {
   "name": "tensor.js",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "tensor data structure and operations",
   "main": "tensor.js",
   "scripts": {
